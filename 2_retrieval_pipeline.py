@@ -1,5 +1,5 @@
 ﻿from langchain_chroma import Chroma
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_ollama import OllamaEmbeddings
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -7,7 +7,7 @@ load_dotenv()
 persistent_directory = "db/chroma_db"
 
 # Load embeddings and vector store
-embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2", model_kwargs={"local_files_only": True})
+embedding_model = OllamaEmbeddings(model="nomic-embed-text")
 
 db = Chroma(
     persist_directory=persistent_directory,

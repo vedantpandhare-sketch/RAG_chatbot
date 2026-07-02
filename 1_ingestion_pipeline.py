@@ -6,7 +6,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 from pathlib import Path
 from langchain_core.documents import Document
 from langchain_text_splitters import CharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_ollama import OllamaEmbeddings
 from langchain_chroma import Chroma
 from dotenv import load_dotenv
 
@@ -68,22 +68,33 @@ def split_documents(documents, chunk_size=1000, chunk_overlap=0):
     
     return chunks
 
-def create_vector_store(chunks, persist_directory="db/chroma_db"):
-    """Create and persist ChromaDB vector store"""
+def create_vector_store(chunks, persist_directory="db/chroma_db", batch_size=100):
+    """Create and persist ChromaDB vector store.
+
+    Embeddings are added in small batches so the local Ollama embedding
+    runner is never handed a huge payload at once (a single giant request
+    crashes the runner on low-RAM CPU-only machines).
+    """
     print("Creating embeddings and storing in ChromaDB...")
-        
-    embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2", model_kwargs={"local_files_only": True})
-    
-    # Create ChromaDB vector store
+
+    embedding_model = OllamaEmbeddings(model="nomic-embed-text")
+
+    # Create an empty ChromaDB vector store, then fill it batch by batch.
     print("--- Creating vector store ---")
-    vectorstore = Chroma.from_documents(
-        documents=chunks,
-        embedding=embedding_model,
-        persist_directory=persist_directory, 
-        collection_metadata={"hnsw:space": "cosine"}
+    vectorstore = Chroma(
+        embedding_function=embedding_model,
+        persist_directory=persist_directory,
+        collection_metadata={"hnsw:space": "cosine"},
     )
+
+    total = len(chunks)
+    for start in range(0, total, batch_size):
+        batch = chunks[start:start + batch_size]
+        vectorstore.add_documents(batch)
+        print(f"  Embedded {min(start + batch_size, total)}/{total} chunks")
+
     print("--- Finished creating vector store ---")
-    
+
     print(f"Vector store created and saved to {persist_directory}")
     return vectorstore
 
@@ -105,7 +116,7 @@ def main():
     if os.path.exists(persistent_directory):
         print("[OK] Vector store already exists. No need to re-process documents.")
 
-        embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2", model_kwargs={"local_files_only": True})
+        embedding_model = OllamaEmbeddings(model="nomic-embed-text")
         try:
             vectorstore = Chroma(
                 persist_directory=persistent_directory,

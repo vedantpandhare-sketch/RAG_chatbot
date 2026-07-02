@@ -4,25 +4,21 @@ from typing import List, Tuple
 
 from dotenv import load_dotenv
 from langchain_chroma import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_ollama import OllamaEmbeddings, ChatOllama
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_groq import ChatGroq
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 load_dotenv()
 
 PERSIST_DIRECTORY = "db/chroma_db"
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-CHAT_MODEL = "llama-3.1-8b-instant"
+EMBEDDING_MODEL = "nomic-embed-text"
+CHAT_MODEL = "qwen2.5:3b-instruct"
 TOP_K = 4
 MAX_HISTORY_TURNS = 3
 
 
 def build_embedding_model():
-    return HuggingFaceEmbeddings(
-        model_name=EMBEDDING_MODEL,
-        model_kwargs={"local_files_only": True},
-    )
+    return OllamaEmbeddings(model=EMBEDDING_MODEL)
 
 
 def load_vector_store():
@@ -90,10 +86,6 @@ User question:
 
 
 def main():
-    if not os.getenv("GROQ_API_KEY"):
-        print("GROQ_API_KEY is missing. Add it to your .env file first.")
-        return
-
     print("Starting RAG terminal chatbot...")
     print("Type your question and press Enter. Type 'exit' or 'quit' to stop.\n")
 
@@ -105,7 +97,7 @@ def main():
         return
 
     retriever = db.as_retriever(search_kwargs={"k": TOP_K})
-    model = ChatGroq(model=CHAT_MODEL, temperature=0)
+    model = ChatOllama(model=CHAT_MODEL, temperature=0)
     history = []
 
     while True:
