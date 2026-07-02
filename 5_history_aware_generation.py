@@ -5,25 +5,21 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from dotenv import load_dotenv
 from langchain_chroma import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_ollama import OllamaEmbeddings, ChatOllama
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
-from langchain_groq import ChatGroq
 
 # Load environment variables
 load_dotenv()
 
 # Constants (aligned with the rest of the project)
 PERSIST_DIRECTORY = "db/chroma_db"
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-CHAT_MODEL = "llama-3.1-8b-instant"
+EMBEDDING_MODEL = "nomic-embed-text"
+CHAT_MODEL = "qwen2.5:3b-instruct"
 TOP_K = 3
 MAX_HISTORY_TURNS = 6  # keep last 6 messages (3 turns)
 
 # Connect to your document database
-embeddings = HuggingFaceEmbeddings(
-    model_name=EMBEDDING_MODEL,
-    model_kwargs={"local_files_only": True},
-)
+embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL)
 db = Chroma(
     persist_directory=PERSIST_DIRECTORY,
     embedding_function=embeddings,
@@ -31,7 +27,7 @@ db = Chroma(
 )
 
 # Set up AI model
-model = ChatGroq(model=CHAT_MODEL, temperature=0)
+model = ChatOllama(model=CHAT_MODEL, temperature=0)
 
 # Store our conversation as messages
 chat_history = []
@@ -110,10 +106,6 @@ def ask_question(user_question):
 
 # Simple chat loop
 def start_chat():
-    if not os.getenv("GROQ_API_KEY"):
-        print("GROQ_API_KEY is missing. Add it to your .env file first.")
-        return
-
     if not os.path.exists(PERSIST_DIRECTORY):
         print(
             f"Vector database not found at '{PERSIST_DIRECTORY}'. "

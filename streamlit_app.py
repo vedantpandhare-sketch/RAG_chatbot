@@ -20,8 +20,7 @@ import streamlit as st
 from dotenv import load_dotenv
 from langchain_chroma import Chroma
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langchain_groq import ChatGroq
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_ollama import ChatOllama, OllamaEmbeddings
 
 # ── Page config (must be first Streamlit call) ────────────────────────────────
 st.set_page_config(
@@ -194,13 +193,12 @@ hr { border-color: rgba(255,255,255,0.07); }
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 PERSIST_DIRECTORY = "db/chroma_db"
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-DEFAULT_CHAT_MODEL = "llama-3.1-8b-instant"
+EMBEDDING_MODEL = "nomic-embed-text"
+DEFAULT_CHAT_MODEL = "qwen2.5:3b-instruct"
 AVAILABLE_MODELS = [
-    "llama-3.1-8b-instant",
-    "llama-3.3-70b-versatile",
-    "mixtral-8x7b-32768",
-    "gemma2-9b-it",
+    "qwen2.5:3b-instruct",
+    "llama3.2:latest",
+    "qwen3:latest",
 ]
 
 load_dotenv()
@@ -230,24 +228,35 @@ _init_state()
 # ── Backend initialisation (cached per session) ───────────────────────────────
 @st.cache_resource(show_spinner=False)
 def load_resources(chat_model: str):
-    """Load embeddings, vector store, and Groq model once per session."""
-    embeddings = HuggingFaceEmbeddings(
-        model_name=EMBEDDING_MODEL,
-        model_kwargs={"local_files_only": True},
-    )
+    """Load embeddings, vector store, and local Ollama model once per session."""
+    embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL)
     db = Chroma(
         persist_directory=PERSIST_DIRECTORY,
         embedding_function=embeddings,
         collection_metadata={"hnsw:space": "cosine"},
     )
-    model = ChatGroq(model=chat_model, temperature=0)
+    model = ChatOllama(model=chat_model, temperature=0)
     return embeddings, db, model
+
+
+def ollama_up() -> bool:
+    """Return True if a local Ollama server is reachable."""
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=2) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
 
 
 def ensure_ready(chat_model: str) -> bool:
     """Initialise resources if not already done. Returns True if OK."""
-    if not os.getenv("GROQ_API_KEY"):
-        st.session_state.init_error = "🔑 `GROQ_API_KEY` is missing. Add it to your `.env` file."
+    if not ollama_up():
+        st.session_state.init_error = (
+            "🦙 Ollama server not reachable at `localhost:11434`. "
+            "Start Ollama and make sure the models are pulled."
+        )
         st.session_state.ready = False
         return False
     if not os.path.exists(PERSIST_DIRECTORY):
@@ -275,7 +284,7 @@ def ensure_ready(chat_model: str) -> bool:
 def rag_answer(user_question: str, top_k: int, max_history_turns: int):
     """Run history-aware retrieval + generation. Returns (answer, docs, search_q)."""
     db: Chroma = st.session_state.db
-    model: ChatGroq = st.session_state.model
+    model: ChatOllama = st.session_state.model
     lc_history: list = st.session_state.lc_history
 
     # Step 1 — Rewrite question as standalone if history exists
@@ -336,7 +345,7 @@ with st.sidebar:
     st.markdown("---")
 
     selected_model = st.selectbox(
-        "🧠 Groq Model",
+        "🧠 Local Model (Ollama)",
         AVAILABLE_MODELS,
         index=AVAILABLE_MODELS.index(st.session_state.chat_model),
         key="model_select",
@@ -379,17 +388,17 @@ with st.sidebar:
 
     st.markdown("---")
     # System status
-    groq_ok = bool(os.getenv("GROQ_API_KEY"))
+    ollama_ok = ollama_up()
     db_ok = os.path.exists(PERSIST_DIRECTORY)
     st.markdown(
-        f"**GROQ_API_KEY** {'<span class=\"badge-ok\">✓ found</span>' if groq_ok else '<span class=\"badge-err\">✗ missing</span>'}<br>"
+        f"**Ollama server** {'<span class=\"badge-ok\">✓ running</span>' if ollama_ok else '<span class=\"badge-err\">✗ offline</span>'}<br>"
         f"**Vector DB** {'<span class=\"badge-ok\">✓ found</span>' if db_ok else '<span class=\"badge-err\">✗ missing</span>'}",
         unsafe_allow_html=True,
     )
     st.markdown("---")
     st.markdown(
         "<div style='font-size:0.72rem;color:#4a5568;text-align:center'>"
-        "Powered by LangChain · Groq · ChromaDB<br>HuggingFace Embeddings"
+        "Powered by LangChain · Ollama · ChromaDB<br>nomic-embed-text Embeddings"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -400,7 +409,7 @@ st.markdown(
     """
 <div class="rag-header">
   <h1>🤖 RAG Chatbot</h1>
-  <p>History-aware retrieval · Groq LLM · ChromaDB</p>
+  <p>History-aware retrieval · Local Ollama LLM · ChromaDB</p>
 </div>
 """,
     unsafe_allow_html=True,
