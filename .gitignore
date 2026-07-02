@@ -1,0 +1,118 @@
+# =======================
+# Python
+# =======================
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+wheels/
+*.whl
+.eggs/
+MANIFEST
+
+# =======================
+# Virtual Environment
+# =======================
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.python-version
+
+# =======================
+# Environment Variables
+# =======================
+.env
+.env.*
+*.env
+secrets.toml
+
+# =======================
+# Streamlit
+# =======================
+.streamlit/secrets.toml
+
+# =======================
+# Jupyter Notebooks
+# =======================
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# =======================
+# IDE / Editors
+# =======================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# =======================
+# Logs & Temporary Files
+# =======================
+*.log
+*.tmp
+*.bak
+*.cache
+logs/
+tmp/
+
+# =======================
+# Testing & Coverage
+# =======================
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+*.cover
+.hypothesis/
+.tox/
+
+# =======================
+# Data / Model Files
+# =======================
+*.pkl
+*.pickle
+*.h5
+*.hdf5
+*.pt
+*.pth
+*.onnx
+*.bin
+*.safetensors
+*.npy
+*.npz
+faiss_index/
+chroma_db/
+vectorstore/
+
+# =======================
+# Database
+# =======================
+*.db
+*.sqlite
+*.sqlite3
+
+# =======================
+# OS Generated
+# =======================
+.DS_Store
+Desktop.ini
+$RECYCLE.BIN/
+ehthumbs.db
+
+# =======================
+# Distribution / Packaging
+# =======================
+*.spec
