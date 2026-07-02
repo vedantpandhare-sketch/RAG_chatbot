@@ -2,4 +2,6 @@ langchain
 langchain-chroma
 langchain-ollama
 langchain-text-splitters
+langsmith
+streamlit
 python-dotenv

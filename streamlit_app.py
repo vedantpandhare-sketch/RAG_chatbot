@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 from langchain_chroma import Chroma
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama, OllamaEmbeddings
+from langsmith import traceable
 
 # ── Page config (must be first Streamlit call) ────────────────────────────────
 st.set_page_config(
@@ -193,7 +194,7 @@ hr { border-color: rgba(255,255,255,0.07); }
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 PERSIST_DIRECTORY = "db/chroma_db"
-EMBEDDING_MODEL = "nomic-embed-text"
+EMBEDDING_MODEL = "bge-m3"
 DEFAULT_CHAT_MODEL = "qwen2.5:3b-instruct"
 AVAILABLE_MODELS = [
     "qwen2.5:3b-instruct",
@@ -212,7 +213,7 @@ def _init_state():
         "db": None,
         "model": None,
         "embeddings": None,
-        "top_k": 3,
+        "top_k": 2,
         "max_history_turns": 6,
         "chat_model": DEFAULT_CHAT_MODEL,
         "ready": False,
@@ -281,6 +282,7 @@ def ensure_ready(chat_model: str) -> bool:
 
 
 # ── Core RAG logic ────────────────────────────────────────────────────────────
+@traceable(run_type="chain", name="rag_answer")
 def rag_answer(user_question: str, top_k: int, max_history_turns: int):
     """Run history-aware retrieval + generation. Returns (answer, docs, search_q)."""
     db: Chroma = st.session_state.db
@@ -398,7 +400,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown(
         "<div style='font-size:0.72rem;color:#4a5568;text-align:center'>"
-        "Powered by LangChain · Ollama · ChromaDB<br>nomic-embed-text Embeddings"
+        "Powered by LangChain · Ollama · ChromaDB<br>bge-m3 Embeddings"
         "</div>",
         unsafe_allow_html=True,
     )

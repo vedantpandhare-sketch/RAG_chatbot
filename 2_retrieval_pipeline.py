@@ -7,7 +7,7 @@ load_dotenv()
 persistent_directory = "db/chroma_db"
 
 # Load embeddings and vector store
-embedding_model = OllamaEmbeddings(model="nomic-embed-text")
+embedding_model = OllamaEmbeddings(model="bge-m3")
 
 db = Chroma(
     persist_directory=persistent_directory,
@@ -18,7 +18,7 @@ db = Chroma(
 # Search for relevant documents
 query = "who is the CEO of Alphabet inc?"
 
-retriever = db.as_retriever(search_kwargs={"k": 5})
+retriever = db.as_retriever(search_kwargs={"k": 2})
 
 # retriever = db.as_retriever(
 #     search_type="similarity_score_threshold",

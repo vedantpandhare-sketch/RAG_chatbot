@@ -6,14 +6,15 @@ from dotenv import load_dotenv
 from langchain_chroma import Chroma
 from langchain_ollama import OllamaEmbeddings, ChatOllama
 from langchain_core.messages import HumanMessage, SystemMessage
+from langsmith import traceable
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 load_dotenv()
 
 PERSIST_DIRECTORY = "db/chroma_db"
-EMBEDDING_MODEL = "nomic-embed-text"
+EMBEDDING_MODEL = "bge-m3"
 CHAT_MODEL = "qwen2.5:3b-instruct"
-TOP_K = 4
+TOP_K = 2
 MAX_HISTORY_TURNS = 3
 
 
@@ -52,6 +53,7 @@ def format_history(history: List[Tuple[str, str]]):
     )
 
 
+@traceable(run_type="chain", name="rag_answer_question")
 def answer_question(question, retriever, model, history):
     docs = retriever.invoke(question)
     context = format_context(docs)

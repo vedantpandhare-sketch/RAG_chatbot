@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import sys
@@ -5,12 +6,40 @@ import sys
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 from pathlib import Path
 from langchain_core.documents import Document
-from langchain_text_splitters import CharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_ollama import OllamaEmbeddings
 from langchain_chroma import Chroma
 from dotenv import load_dotenv
 
 load_dotenv()
+
+def load_json_pages(path):
+    """Load a page-structured JSON file into one Document per page.
+
+    Expects the shape produced by the OCR extractor:
+        {"source_pdf": ..., "pages": [{"page_number": 1, "text": "..."}, ...]}
+    Empty / whitespace-only pages are skipped.
+    """
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    source_name = data.get("source_pdf", str(path))
+    docs = []
+    for page in data.get("pages", []):
+        text = (page.get("text") or "").strip()
+        if not text:
+            continue
+        docs.append(
+            Document(
+                page_content=text,
+                metadata={
+                    "source": str(path),
+                    "source_pdf": source_name,
+                    "page_number": page.get("page_number"),
+                },
+            )
+        )
+    print(f"  Loaded {len(docs)} pages from {path}")
+    return docs
+
 
 def load_documents(docs_path="Docs"):
     """Load all text files from the docs directory"""
@@ -21,6 +50,8 @@ def load_documents(docs_path="Docs"):
         raise FileNotFoundError(f"The directory {docs_path} does not exist. Please create it and add your company files.")
     
     documents = []
+
+    # Plain text files -> one Document each.
     for path in sorted(Path(docs_path).glob("*.txt")):
         documents.append(
             Document(
@@ -28,9 +59,13 @@ def load_documents(docs_path="Docs"):
                 metadata={"source": str(path)},
             )
         )
-    
+
+    # JSON files (e.g. OCR-extracted newspaper) -> one Document per page.
+    for path in sorted(Path(docs_path).glob("*.json")):
+        documents.extend(load_json_pages(path))
+
     if len(documents) == 0:
-        raise FileNotFoundError(f"No .txt files found in {docs_path}. Please add your company documents.")
+        raise FileNotFoundError(f"No .txt or .json files found in {docs_path}. Please add your documents.")
     
    
     for i, doc in enumerate(documents[:2]):  # Show first 2 documents
@@ -42,13 +77,16 @@ def load_documents(docs_path="Docs"):
 
     return documents
 
-def split_documents(documents, chunk_size=1000, chunk_overlap=0):
+def split_documents(documents, chunk_size=500, chunk_overlap=50):
     """Split documents into smaller chunks with overlap"""
     print("Splitting documents into chunks...")
-    
-    text_splitter = CharacterTextSplitter(
-        chunk_size=chunk_size, 
-        chunk_overlap=chunk_overlap
+
+    # Recursive splitter breaks down to the character level, so chunks actually
+    # respect chunk_size (CharacterTextSplitter can't cut below paragraph breaks
+    # and produced oversized 1500+ char chunks -> bloated prompts -> slow prefill).
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
     )
     
     chunks = text_splitter.split_documents(documents)
@@ -77,7 +115,7 @@ def create_vector_store(chunks, persist_directory="db/chroma_db", batch_size=100
     """
     print("Creating embeddings and storing in ChromaDB...")
 
-    embedding_model = OllamaEmbeddings(model="nomic-embed-text")
+    embedding_model = OllamaEmbeddings(model="bge-m3")
 
     # Create an empty ChromaDB vector store, then fill it batch by batch.
     print("--- Creating vector store ---")
@@ -116,7 +154,7 @@ def main():
     if os.path.exists(persistent_directory):
         print("[OK] Vector store already exists. No need to re-process documents.")
 
-        embedding_model = OllamaEmbeddings(model="nomic-embed-text")
+        embedding_model = OllamaEmbeddings(model="bge-m3")
         try:
             vectorstore = Chroma(
                 persist_directory=persistent_directory,

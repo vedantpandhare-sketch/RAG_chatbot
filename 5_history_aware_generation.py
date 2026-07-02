@@ -13,9 +13,9 @@ load_dotenv()
 
 # Constants (aligned with the rest of the project)
 PERSIST_DIRECTORY = "db/chroma_db"
-EMBEDDING_MODEL = "nomic-embed-text"
+EMBEDDING_MODEL = "bge-m3"
 CHAT_MODEL = "qwen2.5:3b-instruct"
-TOP_K = 3
+TOP_K = 2
 MAX_HISTORY_TURNS = 6  # keep last 6 messages (3 turns)
 
 # Connect to your document database
