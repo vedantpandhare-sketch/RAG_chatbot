@@ -9,6 +9,7 @@ from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_ollama import OllamaEmbeddings
 from langchain_chroma import Chroma
+from tqdm import tqdm
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -126,10 +127,11 @@ def create_vector_store(chunks, persist_directory="db/chroma_db", batch_size=100
     )
 
     total = len(chunks)
-    for start in range(0, total, batch_size):
-        batch = chunks[start:start + batch_size]
-        vectorstore.add_documents(batch)
-        print(f"  Embedded {min(start + batch_size, total)}/{total} chunks")
+    with tqdm(total=total, unit="chunk", desc="Embedding", ncols=80) as bar:
+        for start in range(0, total, batch_size):
+            batch = chunks[start:start + batch_size]
+            vectorstore.add_documents(batch)
+            bar.update(len(batch))
 
     print("--- Finished creating vector store ---")
 
