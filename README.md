@@ -6,12 +6,12 @@ A **History-Aware Retrieval-Augmented Generation (RAG) Chatbot** built with Lang
 
 ## ✨ Features
 
-- **📄 Document Ingestion** — Loads and chunks `.txt` files from a `Docs/` directory into a persistent ChromaDB vector store
-- **🔍 Semantic Retrieval** — Retrieves the most relevant document chunks using cosine-similarity search via HuggingFace embeddings (`all-MiniLM-L6-v2`)
-- **🧠 History-Aware Q&A** — Rewrites follow-up questions as standalone queries using conversation history before retrieval
-- **⚡ Groq LLM Inference** — Ultra-fast inference powered by [Groq](https://groq.com/) with multiple model choices
-- **🌐 Streamlit Web UI** — A polished, dark-themed chat interface with configurable settings, session stats, and source citation
-- **💻 Terminal Chatbot** — Lightweight CLI chatbot for quick testing without launching a browser
+- **Document Ingestion** — Loads and chunks `.txt` files from a `Docs/` directory into a persistent ChromaDB vector store
+- **Semantic Retrieval** — Retrieves the most relevant document chunks using cosine-similarity search via HuggingFace embeddings (`all-MiniLM-L6-v2`)
+- **History-Aware Q&A** — Rewrites follow-up questions as standalone queries using conversation history before retrieval
+- **Groq LLM Inference** — Ultra-fast inference powered by [Groq](https://groq.com/) with multiple model choices
+- **Streamlit Web UI** — A polished, dark-themed chat interface with configurable settings, session stats, and source citation
+- **Terminal Chatbot** — Lightweight CLI chatbot for quick testing without launching a browser
 
 ---
 
@@ -238,6 +238,6 @@ This project is open-source and available under the [MIT License](LICENSE).
 
 <div align="center">
 
-**Built with** ❤️ **using LangChain · Groq · ChromaDB · Streamlit · HuggingFace**
+**Built using LangChain · Groq · ChromaDB · Streamlit · HuggingFace**
 
 </div>
