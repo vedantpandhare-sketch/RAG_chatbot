@@ -15,7 +15,8 @@ load_dotenv()
 PERSIST_DIRECTORY = "db/chroma_db"
 EMBEDDING_MODEL = "bge-m3"
 CHAT_MODEL = "qwen2.5:3b-instruct"
-TOP_K = 2
+TOP_K = 5  # Retrieve more candidates, better filtering below
+SIMILARITY_THRESHOLD = 0.5  # Filter out low-quality matches (bge-m3 cosine similarity)
 MAX_HISTORY_TURNS = 6  # keep last 6 messages (3 turns)
 
 # Connect to your document database
@@ -58,7 +59,13 @@ def ask_question(user_question):
         search_question = user_question
 
     # Step 2: Find relevant documents
-    retriever = db.as_retriever(search_kwargs={"k": TOP_K})
+    retriever = db.as_retriever(
+        search_type="similarity_score_threshold",
+        search_kwargs={
+            "k": TOP_K,
+            "score_threshold": SIMILARITY_THRESHOLD  # Only return high-quality matches
+        }
+    )
     docs = retriever.invoke(search_question)
 
     print(f"Found {len(docs)} relevant documents:")
@@ -68,6 +75,14 @@ def ask_question(user_question):
         preview = "\n".join(lines)
         source = doc.metadata.get("source", "unknown source")
         print(f"  Doc {i} [{source}]: {preview}...")
+
+    # If no documents found with high similarity, inform user
+    if not docs:
+        print("⚠️  No documents found with sufficient similarity. The answer may not be reliable.")
+        answer = "I don't have enough information to answer that question based on the provided documents."
+        chat_history.append(HumanMessage(content=user_question))
+        chat_history.append(AIMessage(content=answer))
+        return answer
 
     # Step 3: Create final prompt
     context_blocks = []
@@ -79,15 +94,24 @@ def ask_question(user_question):
     combined_input = (
         f"Based on the following documents, please answer this question: {user_question}\n\n"
         f"Documents:\n{context}\n\n"
-        "Please provide a clear, helpful answer using only the information from these "
-        'documents. If you can\'t find the answer in the documents, say '
-        '"I don\'t have enough information to answer that question based on the provided documents."'
+        "IMPORTANT RULES:\n"
+        "1. ONLY use information from the provided documents above.\n"
+        "2. Do NOT make up, infer, or assume any information not in the documents.\n"
+        "3. If the answer is not explicitly in the documents, you MUST say: "
+        '"I don\'t have enough information to answer that question based on the provided documents."\n'
+        "4. Cite which document you're pulling information from.\n"
+        "5. Be precise and literal with the facts."
     )
 
     # Step 4: Get the answer
     messages = [
         SystemMessage(
-            content="You are a helpful assistant that answers questions based on provided documents and conversation history."
+            content=(
+                "You are a strict, factual assistant that answers questions based ONLY on provided documents. "
+                "You will NOT invent, hallucinate, or infer information beyond what is explicitly stated. "
+                "You MUST refuse to answer if the document doesn't contain the answer. "
+                "Be precise, literal, and cite your sources."
+            )
         ),
     ] + chat_history[-MAX_HISTORY_TURNS:] + [
         HumanMessage(content=combined_input)

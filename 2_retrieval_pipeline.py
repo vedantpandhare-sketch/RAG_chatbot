@@ -18,15 +18,13 @@ db = Chroma(
 # Search for relevant documents
 query = "who is the CEO of Alphabet inc?"
 
-retriever = db.as_retriever(search_kwargs={"k": 2})
-
-# retriever = db.as_retriever(
-#     search_type="similarity_score_threshold",
-#     search_kwargs={
-#         "k": 5,
-#         "score_threshold": 0.3  # Only return chunks with cosine similarity â‰¥ 0.3
-#     }
-# )
+retriever = db.as_retriever(
+    search_type="similarity_score_threshold",
+    search_kwargs={
+        "k": 5,
+        "score_threshold": 0.5  # Only return chunks with high similarity
+    }
+)
 
 relevant_docs = retriever.invoke(query)
 

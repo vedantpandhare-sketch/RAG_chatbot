@@ -23,15 +23,13 @@ db = Chroma(
 # Search for relevant documents
 query = "How much did Microsoft pay to acquire GitHub?"
 
-retriever = db.as_retriever(search_kwargs={"k": 2})
-
-# retriever = db.as_retriever(
-#     search_type="similarity_score_threshold",
-#     search_kwargs={
-#         "k": 5,
-#         "score_threshold": 0.3  # Only return chunks with cosine similarity â‰¥ 0.3
-#     }
-# )
+retriever = db.as_retriever(
+    search_type="similarity_score_threshold",
+    search_kwargs={
+        "k": 5,
+        "score_threshold": 0.5  # Only return chunks with high similarity
+    }
+)
 
 relevant_docs = retriever.invoke(query)
 
@@ -48,15 +46,18 @@ combined_input = f"""Based on the following documents, please answer this questi
 Documents:
 {chr(10).join([f"- {doc.page_content}" for doc in relevant_docs])}
 
-Please provide a clear, helpful answer using only the information from these documents. If you can't find the answer in the documents, say "I don't have enough information to answer that question based on the provided documents."
-"""
+IMPORTANT RULES:
+1. ONLY use information from the provided documents above.
+2. Do NOT make up, infer, or assume any information not in the documents.
+3. If the answer is not explicitly in the documents, you MUST say: "I don't have enough information to answer that question based on the provided documents."
+4. Be precise and literal with the facts."""
 
 # Create a local Ollama chat model
 model = ChatOllama(model="qwen2.5:3b-instruct", temperature=0)
 
 # Define the messages for the model
 messages = [
-    SystemMessage(content="You are a helpful assistant."),
+    SystemMessage(content="You are a strict, factual assistant that answers questions based ONLY on provided documents. You will NOT invent, hallucinate, or infer information beyond what is explicitly stated. You MUST refuse to answer if the document doesn't contain the answer."),
     HumanMessage(content=combined_input),
 ]
 

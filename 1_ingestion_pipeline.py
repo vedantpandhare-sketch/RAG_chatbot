@@ -78,8 +78,12 @@ def load_documents(docs_path="Docs"):
 
     return documents
 
-def split_documents(documents, chunk_size=500, chunk_overlap=50):
-    """Split documents into smaller chunks with overlap"""
+def split_documents(documents, chunk_size=800, chunk_overlap=100):
+    """Split documents into smaller chunks with overlap.
+    
+    For multilingual content like Marathi, larger chunks (800) preserve better context,
+    and higher overlap (100) ensures semantic boundaries are respected.
+    """
     print("Splitting documents into chunks...")
 
     # Recursive splitter breaks down to the character level, so chunks actually
@@ -143,7 +147,7 @@ def main():
     print("=== RAG Document Ingestion Pipeline ===\n")
     
     # Define paths
-    docs_path = "docs"
+    docs_path = "Docs"
     persistent_directory = "db/chroma_db"
     
     rebuild = "--rebuild" in sys.argv
