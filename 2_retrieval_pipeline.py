@@ -22,7 +22,7 @@ retriever = db.as_retriever(
     search_type="similarity_score_threshold",
     search_kwargs={
         "k": 5,
-        "score_threshold": 0.5  # Only return chunks with high similarity
+        "score_threshold": 0.35  # Lower for multilingual (Marathi) matching
     }
 )
 

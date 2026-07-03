@@ -8,13 +8,19 @@ from langchain_ollama import OllamaEmbeddings, ChatOllama
 from langchain_core.messages import HumanMessage, SystemMessage
 from langsmith import traceable
 
+from rag_hybrid import (
+    HybridRetriever,
+    build_marathi_rewrite_prompt,
+    extractive_marathi_answer_strict,
+)
+
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 load_dotenv()
 
 PERSIST_DIRECTORY = "db/chroma_db"
 EMBEDDING_MODEL = "bge-m3"
-CHAT_MODEL = "qwen2.5:3b-instruct"
-TOP_K = 2
+CHAT_MODEL = "llama2:latest"
+TOP_K = 5
 MAX_HISTORY_TURNS = 3
 
 
@@ -54,37 +60,42 @@ def format_history(history: List[Tuple[str, str]]):
 
 
 @traceable(run_type="chain", name="rag_answer_question")
-def answer_question(question, retriever, model, history):
-    docs = retriever.invoke(question)
-    context = format_context(docs)
-    conversation_history = format_history(history)
+def answer_question(question, retriever, model, history, db):
+    search_question = question
+    if False and history:
+        rewrite_prompt = build_marathi_rewrite_prompt(question, format_history(history))
+        rewrite_messages = [
+            SystemMessage(content="तुम्ही फक्त प्रश्न पुनर्लेखन करणारे सहाय्यक आहात. फक्त पुनर्लिखित प्रश्न द्या."),
+            HumanMessage(content=rewrite_prompt),
+        ]
+        search_question = model.invoke(rewrite_messages).content.strip() or question
 
-    prompt = f"""Use the retrieved documents to answer the user's question.
+    docs, _ = retriever.retrieve(
+        db,
+        search_question,
+        top_k=TOP_K,
+        semantic_k=max(12, TOP_K * 4),
+        lexical_k=max(12, TOP_K * 6),
+        min_score=0.12,
+    )
+    answer = extractive_marathi_answer_strict(question, docs)
+    sources = sorted({doc.metadata.get("source", "unknown source") for doc in docs})
+    return answer, sources
+    context = hybrid_format_context(docs, max_chars_per_doc=1200)
 
-Rules:
-- Answer only from the retrieved document context.
-- If the answer is not in the context, say you do not have enough information in the documents.
-- Keep the answer concise and conversational.
-- Use the previous conversation only to understand follow-up questions.
-
-Previous conversation:
-{conversation_history}
-
-Retrieved context:
-{context}
-
-User question:
-{question}
-"""
-
+    prompt = build_marathi_answer_prompt(question, context)
     messages = [
-        SystemMessage(content="You are a helpful RAG chatbot for company documents."),
+        SystemMessage(content="तू काटेकोर दस्तऐवज-आधारित सहाय्यक आहेस. उत्तर मराठीतच द्या."),
         HumanMessage(content=prompt),
     ]
 
     result = model.invoke(messages)
+    answer = result.content.strip()
+    ok, _reason = validate_marathi_answer(answer, context)
+    if not ok:
+        answer = refusal_message()
     sources = sorted({doc.metadata.get("source", "unknown source") for doc in docs})
-    return result.content.strip(), sources
+    return answer, sources
 
 
 def main():
@@ -98,8 +109,8 @@ def main():
         print("Try running: .\\venv\\Scripts\\python.exe .\\1_ingestion_pipeline.py --rebuild")
         return
 
-    retriever = db.as_retriever(search_kwargs={"k": TOP_K})
-    model = ChatOllama(model=CHAT_MODEL, temperature=0)
+    retriever = HybridRetriever.from_vector_store(db)
+    model = ChatOllama(model=CHAT_MODEL, temperature=0, num_predict=256)
     history = []
 
     while True:
@@ -111,7 +122,7 @@ def main():
             break
 
         try:
-            answer, sources = answer_question(question, retriever, model, history)
+            answer, sources = answer_question(question, retriever, model, history, db)
         except Exception as exc:
             print(f"Bot: Sorry, I ran into an error: {exc}\n")
             continue

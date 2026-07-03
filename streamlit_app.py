@@ -23,6 +23,12 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langsmith import traceable
 
+from rag_hybrid import (
+    HybridRetriever,
+    build_marathi_rewrite_prompt,
+    extractive_marathi_answer_strict,
+)
+
 # ── Page config (must be first Streamlit call) ────────────────────────────────
 st.set_page_config(
     page_title="RAG Chatbot",
@@ -195,8 +201,11 @@ hr { border-color: rgba(255,255,255,0.07); }
 # ── Constants ─────────────────────────────────────────────────────────────────
 PERSIST_DIRECTORY = "db/chroma_db"
 EMBEDDING_MODEL = "bge-m3"
-DEFAULT_CHAT_MODEL = "qwen2.5:3b-instruct"
+DEFAULT_CHAT_MODEL = "llama2:latest"
+DEFAULT_TOP_K = 3
+DEFAULT_SIMILARITY_THRESHOLD = 0.35  # Lower for multilingual (Marathi) text matching
 AVAILABLE_MODELS = [
+    "llama2:latest",
     "qwen2.5:3b-instruct",
     "llama3.2:latest",
     "qwen3:latest",
@@ -213,7 +222,9 @@ def _init_state():
         "db": None,
         "model": None,
         "embeddings": None,
-        "top_k": 2,
+        "hybrid_index": None,
+        "top_k": DEFAULT_TOP_K,
+        "similarity_threshold": DEFAULT_SIMILARITY_THRESHOLD,
         "max_history_turns": 6,
         "chat_model": DEFAULT_CHAT_MODEL,
         "ready": False,
@@ -236,7 +247,7 @@ def load_resources(chat_model: str):
         embedding_function=embeddings,
         collection_metadata={"hnsw:space": "cosine"},
     )
-    model = ChatOllama(model=chat_model, temperature=0)
+    model = ChatOllama(model=chat_model, temperature=0, num_predict=256)
     return embeddings, db, model
 
 
@@ -272,6 +283,7 @@ def ensure_ready(chat_model: str) -> bool:
         st.session_state.embeddings = embeddings
         st.session_state.db = db
         st.session_state.model = model
+        st.session_state.hybrid_index = HybridRetriever.from_vector_store(db)
         st.session_state.ready = True
         st.session_state.init_error = None
         return True
@@ -287,17 +299,20 @@ def rag_answer(user_question: str, top_k: int, max_history_turns: int):
     """Run history-aware retrieval + generation. Returns (answer, docs, search_q)."""
     db: Chroma = st.session_state.db
     model: ChatOllama = st.session_state.model
+    hybrid_index: HybridRetriever = st.session_state.hybrid_index
     lc_history: list = st.session_state.lc_history
 
     # Step 1 — Rewrite question as standalone if history exists
-    if lc_history:
+    if False and lc_history:
+        conversation_history = "\n".join(
+            f"वापरकर्ता: {m.content}" if isinstance(m, HumanMessage) else f"सहाय्यक: {m.content}"
+            for m in lc_history[-max_history_turns:]
+        )
         rewrite_msgs = [
             SystemMessage(
-                content=(
-                    "Given the chat history, rewrite the new question to be "
-                    "standalone and searchable. Return only the rewritten question."
-                )
+                content="तुम्ही फक्त प्रश्न पुनर्लेखन करणारे सहाय्यक आहात. उत्तरात फक्त पुनर्लिखित प्रश्न द्या."
             ),
+            HumanMessage(content=build_marathi_rewrite_prompt(user_question, conversation_history)),
         ] + lc_history[-max_history_turns:] + [
             HumanMessage(content=f"New question: {user_question}")
         ]
@@ -305,31 +320,37 @@ def rag_answer(user_question: str, top_k: int, max_history_turns: int):
     else:
         search_question = user_question
 
-    # Step 2 — Retrieve docs
-    retriever = db.as_retriever(search_kwargs={"k": top_k})
-    docs = retriever.invoke(search_question)
+    # Step 2 — Hybrid retrieve + rerank
+    docs, debug = hybrid_index.retrieve(
+        db,
+        search_question,
+        top_k=top_k,
+        semantic_k=max(12, top_k * 4),
+        lexical_k=max(12, top_k * 6),
+        min_score=0.12,
+    )
+    answer = extractive_marathi_answer_strict(user_question, docs)
+    st.session_state.lc_history.append(HumanMessage(content=user_question))
+    st.session_state.lc_history.append(AIMessage(content=answer))
+    return answer, docs, search_question
+
+    if debug:
+        st.session_state.retrieval_debug = debug
 
     # Step 3 — Build context
-    context_blocks = [
-        f"[Document {i} | {doc.metadata.get('source', 'unknown')}]\n{doc.page_content}"
-        for i, doc in enumerate(docs, 1)
-    ]
-    context = "\n\n".join(context_blocks)
+    context = format_context(docs, max_chars_per_doc=1200)
 
-    combined_input = (
-        f"Based on the following documents, answer this question: {user_question}\n\n"
-        f"Documents:\n{context}\n\n"
-        "Answer clearly using only the provided documents. "
-        "If the answer isn't in the documents, say: "
-        '"I don\'t have enough information to answer that question based on the provided documents."'
-    )
-
-    # Step 4 — Generate answer
+    # Step 4 — Generate answer in Marathi
+    combined_input = build_marathi_answer_prompt(user_question, context)
     answer_msgs = [
         SystemMessage(
-            content="You are a helpful assistant answering questions from company documents."
+            content=(
+                "तू एक काटेकोर दस्तऐवज-आधारित सहाय्यक आहेस. "
+                "फक्त दिलेल्या दस्तऐवजांवर आधारित उत्तर दे. "
+                "उत्तर मराठीतच द्या."
+            )
         ),
-    ] + lc_history[-max_history_turns:] + [
+    ] + [
         HumanMessage(content=combined_input)
     ]
     answer = model.invoke(answer_msgs).content.strip()
@@ -364,6 +385,15 @@ with st.sidebar:
         key="top_k_slider",
     )
     st.session_state.top_k = top_k
+
+    similarity_threshold = st.slider(
+        "🎯 Similarity threshold",
+        min_value=0.0, max_value=1.0, step=0.05,
+        value=st.session_state.similarity_threshold,
+        key="similarity_slider",
+        help="Higher = stricter matching (fewer but better results, faster response)"
+    )
+    st.session_state.similarity_threshold = similarity_threshold
 
     max_turns = st.slider(
         "💬 Max history turns",
@@ -428,6 +458,57 @@ if st.session_state.init_error:
     st.stop()
 
 # ── Render existing chat messages ─────────────────────────────────────────────
+@traceable(run_type="chain", name="rag_answer_v2")
+def rag_answer(user_question: str, top_k: int, max_history_turns: int):
+    """Run history-aware hybrid retrieval + Marathi answer generation."""
+    db: Chroma = st.session_state.db
+    model: ChatOllama = st.session_state.model
+    hybrid_index: HybridRetriever = st.session_state.hybrid_index
+    lc_history: list = st.session_state.lc_history
+
+    if False and lc_history:
+        conversation_history = "\n".join(
+            f"वापरकर्ता: {m.content}" if isinstance(m, HumanMessage) else f"सहाय्यक: {m.content}"
+            for m in lc_history[-max_history_turns:]
+        )
+        rewrite_msgs = [
+            SystemMessage(content="तुम्ही फक्त प्रश्न पुनर्लेखन करणारे सहाय्यक आहात. फक्त पुनर्लिखित प्रश्न द्या."),
+            HumanMessage(content=build_marathi_rewrite_prompt(user_question, conversation_history)),
+        ]
+        search_question = model.invoke(rewrite_msgs).content.strip() or user_question
+    else:
+        search_question = user_question
+
+    docs, debug = hybrid_index.retrieve(
+        db,
+        search_question,
+        top_k=top_k,
+        semantic_k=max(12, top_k * 4),
+        lexical_k=max(12, top_k * 6),
+        min_score=0.12,
+    )
+    st.session_state.retrieval_debug = debug
+    answer = extractive_marathi_answer_strict(user_question, docs)
+    st.session_state.lc_history.append(HumanMessage(content=user_question))
+    st.session_state.lc_history.append(AIMessage(content=answer))
+    return answer, docs, search_question
+
+    context = format_context(docs, max_chars_per_doc=1200)
+    combined_input = build_marathi_answer_prompt(user_question, context)
+    answer_msgs = [
+        SystemMessage(content="तू काटेकोर दस्तऐवज-आधारित सहाय्यक आहेस. उत्तर मराठीतच द्या."),
+        HumanMessage(content=combined_input),
+    ]
+    answer = model.invoke(answer_msgs).content.strip()
+    ok, _reason = validate_marathi_answer(answer, context)
+    if not ok:
+        answer = refusal_message()
+
+    st.session_state.lc_history.append(HumanMessage(content=user_question))
+    st.session_state.lc_history.append(AIMessage(content=answer))
+    return answer, docs, search_question
+
+
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"], avatar="🧑" if msg["role"] == "user" else "🤖"):
         st.markdown(msg["content"])

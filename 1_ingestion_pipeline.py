@@ -2,6 +2,8 @@ import json
 import os
 import shutil
 import sys
+import re
+import unicodedata
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 from pathlib import Path
@@ -14,6 +16,65 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+NOISE_PATTERNS = [
+    r"www\.loksatta\.com",
+    r"epaper\.loksatta\.com",
+    r"\bcontact\b",
+    r"\breg\.?\s*no\.?\b",
+    r"\bpage\s*\d+\b",
+]
+
+
+def clean_ocr_text(text, min_line_length=12):
+    """Remove obvious OCR garbage while preserving the page content."""
+    if not text:
+        return ""
+
+    text = unicodedata.normalize("NFKC", text)
+    text = text.replace("\x00", " ")
+    text = re.sub(r"[\u200b-\u200f\u202a-\u202e]", "", text)
+    text = re.sub(r"[^\S\r\n]+", " ", text)
+
+    cleaned_lines = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        lower = line.lower()
+        if any(re.search(pattern, lower, flags=re.IGNORECASE) for pattern in NOISE_PATTERNS):
+            continue
+
+        devanagari_chars = len(re.findall(r"[\u0900-\u097F]", line))
+        latin_chars = len(re.findall(r"[A-Za-z]", line))
+        other_chars = sum(1 for ch in line if not ch.isalnum() and not ch.isspace())
+        total_alpha = devanagari_chars + latin_chars
+
+        if len(line) < min_line_length and total_alpha == 0:
+            continue
+
+        # For Marathi newspaper OCR, long lines with no Devanagari are usually
+        # headers, ads, URLs, or garbage rather than useful article text.
+        if len(line) > 25 and devanagari_chars == 0:
+            if latin_chars > 0 or other_chars > 0:
+                continue
+
+        if len(line) > 40 and total_alpha > 0:
+            devanagari_ratio = devanagari_chars / max(1, total_alpha)
+            symbol_ratio = other_chars / max(1, len(line))
+            if devanagari_ratio < 0.2 and symbol_ratio > 0.35:
+                continue
+
+        if other_chars > len(line) * 0.6 and devanagari_chars == 0 and latin_chars == 0:
+            continue
+
+        cleaned_lines.append(line)
+
+    cleaned = "\n".join(cleaned_lines)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    return cleaned.strip()
+
 def load_json_pages(path):
     """Load a page-structured JSON file into one Document per page.
 
@@ -25,7 +86,7 @@ def load_json_pages(path):
     source_name = data.get("source_pdf", str(path))
     docs = []
     for page in data.get("pages", []):
-        text = (page.get("text") or "").strip()
+        text = clean_ocr_text(page.get("text") or "")
         if not text:
             continue
         docs.append(
@@ -78,7 +139,7 @@ def load_documents(docs_path="Docs"):
 
     return documents
 
-def split_documents(documents, chunk_size=800, chunk_overlap=100):
+def split_documents(documents, chunk_size=500, chunk_overlap=80):
     """Split documents into smaller chunks with overlap.
     
     For multilingual content like Marathi, larger chunks (800) preserve better context,
@@ -92,6 +153,7 @@ def split_documents(documents, chunk_size=800, chunk_overlap=100):
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
+        separators=["\n\n", "\n", "।", ".", "?", "!", " ", ""],
     )
     
     chunks = text_splitter.split_documents(documents)
