@@ -63,7 +63,7 @@ if answer == "मला या प्रश्नासाठी दस्तऐ
     combined_input = build_marathi_answer_prompt(query, context)
     
     # Create local Ollama chat model
-    model = ChatOllama(model="llama2:latest", temperature=0, num_predict=256)
+    model = ChatOllama(model="qwen2.5:3b-instruct", temperature=0, num_predict=256)
     
     # Define messages for the model
     messages = [

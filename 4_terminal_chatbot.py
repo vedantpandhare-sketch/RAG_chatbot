@@ -42,7 +42,7 @@ PERSIST_DIRECTORY = "db/chroma_db"
 EMBEDDING_MODEL   = "bge-m3"
 # llama3.2 / qwen2.5:3b-instruct generate Marathi much better than llama2.
 # Change this to whichever model you have pulled with Ollama.
-CHAT_MODEL        = "llama3.2:latest"
+CHAT_MODEL        = "qwen2.5:3b-instruct"
 TOP_K             = 5
 MAX_HISTORY_TURNS = 3
 
@@ -152,7 +152,7 @@ def main():
         print("Tip: run  python 1_ingestion_pipeline.py --rebuild")
         return
 
-    model   = ChatOllama(model=CHAT_MODEL, temperature=0.2, num_predict=512)
+    model   = ChatOllama(model=CHAT_MODEL, temperature=0.2, num_predict=256)
     history = []
 
     while True:

@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 from langchain_chroma import Chroma
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama, OllamaEmbeddings
+import langsmith
 from langsmith import traceable
 
 import importlib.util
@@ -213,9 +214,8 @@ hr { border-color: rgba(255,255,255,0.07); }
 # ── Constants ─────────────────────────────────────────────────────────────────
 PERSIST_DIRECTORY = "db/chroma_db"
 EMBEDDING_MODEL = "bge-m3"
-# llama3.2 generates Marathi far better than llama2.
-# Change to whichever model you have pulled locally.
-DEFAULT_CHAT_MODEL = "llama3.2:latest"
+# Change to whichever model you have pulled locally. Use Qwen 2.5 instruct by default.
+DEFAULT_CHAT_MODEL = "qwen2.5:3b-instruct"
 DEFAULT_TOP_K = 5
 DEFAULT_SIMILARITY_THRESHOLD = 0.30
 AVAILABLE_MODELS = [
@@ -226,6 +226,8 @@ AVAILABLE_MODELS = [
 ]
 
 load_dotenv()
+# Enable Langsmith tracing v2 (required by traceable in this environment)
+os.environ.setdefault("LANGSMITH_TRACING_V2", "true")
 
 # ── Session state defaults ────────────────────────────────────────────────────
 def _init_state():
@@ -260,7 +262,7 @@ def load_resources(chat_model: str):
         embedding_function=embeddings,
         collection_metadata={"hnsw:space": "cosine"},
     )
-    model = ChatOllama(model=chat_model, temperature=0.2, num_predict=512)
+    model = ChatOllama(model=chat_model, temperature=0.2, num_predict=256)
     return embeddings, db, model
 
 
@@ -520,6 +522,21 @@ if prompt := st.chat_input("Ask a question about your documents…"):
                 max_history_turns=st.session_state.max_history_turns,
             )
             elapsed = time.time() - t0
+            # Report latency to Langsmith as a lightweight run for observability
+            try:
+                client = langsmith.client.Client()
+                client.create_run(
+                    name="rag_answer_latency",
+                    inputs={
+                        "latency_s": float(elapsed),
+                        "model": st.session_state.chat_model,
+                        "top_k": int(st.session_state.top_k),
+                    },
+                    run_type="chain",
+                    project_name=os.getenv("LANGSMITH_PROJECT"),
+                )
+            except Exception:
+                pass
         except Exception as exc:
             thinking_placeholder.error(f"❌ Error: {exc}")
             st.stop()

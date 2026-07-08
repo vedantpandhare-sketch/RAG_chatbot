@@ -25,7 +25,7 @@ load_dotenv()
 # Constants (aligned with the rest of the project)
 PERSIST_DIRECTORY = "db/chroma_db"
 EMBEDDING_MODEL = "bge-m3"
-CHAT_MODEL = "llama2:latest"
+CHAT_MODEL = "qwen2.5:3b-instruct"
 TOP_K = 5  # Retrieve more candidates for multilingual text
 SIMILARITY_THRESHOLD = 0.35  # Lower threshold for better Marathi matching
 MAX_HISTORY_TURNS = 6  # keep last 6 messages (3 turns)
