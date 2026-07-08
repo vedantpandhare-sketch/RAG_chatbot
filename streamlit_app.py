@@ -330,9 +330,12 @@ def rag_answer(user_question: str, top_k: int, max_history_turns: int):
         min_score=0.12,
     )
     answer = extractive_marathi_answer_strict(user_question, docs)
-    st.session_state.lc_history.append(HumanMessage(content=user_question))
-    st.session_state.lc_history.append(AIMessage(content=answer))
-    return answer, docs, search_question
+    if answer != "मला या प्रश्नासाठी दस्तऐवजांमध्ये पुरेशी माहिती सापडली नाही.":
+        if debug:
+            st.session_state.retrieval_debug = debug
+        st.session_state.lc_history.append(HumanMessage(content=user_question))
+        st.session_state.lc_history.append(AIMessage(content=answer))
+        return answer, docs, search_question
 
     if debug:
         st.session_state.retrieval_debug = debug
@@ -358,6 +361,7 @@ def rag_answer(user_question: str, top_k: int, max_history_turns: int):
     # Step 5 — Update LangChain history
     st.session_state.lc_history.append(HumanMessage(content=user_question))
     st.session_state.lc_history.append(AIMessage(content=answer))
+    return answer, docs, search_question
 
     return answer, docs, search_question
 
@@ -488,10 +492,12 @@ def rag_answer(user_question: str, top_k: int, max_history_turns: int):
         min_score=0.12,
     )
     st.session_state.retrieval_debug = debug
+
     answer = extractive_marathi_answer_strict(user_question, docs)
-    st.session_state.lc_history.append(HumanMessage(content=user_question))
-    st.session_state.lc_history.append(AIMessage(content=answer))
-    return answer, docs, search_question
+    if answer != "मला या प्रश्नासाठी दस्तऐवजांमध्ये पुरेशी माहिती सापडली नाही.":
+        st.session_state.lc_history.append(HumanMessage(content=user_question))
+        st.session_state.lc_history.append(AIMessage(content=answer))
+        return answer, docs, search_question
 
     context = format_context(docs, max_chars_per_doc=1200)
     combined_input = build_marathi_answer_prompt(user_question, context)

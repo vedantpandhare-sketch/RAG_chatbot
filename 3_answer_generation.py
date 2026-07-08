@@ -25,7 +25,7 @@ db = Chroma(
 )
 
 # Search for relevant documents
-query = "How much did Microsoft pay to acquire GitHub?"
+query = "पुणे शहरात पाणीपुरवठ्याच्या समस्या काय आहेत?"
 
 hybrid_index = HybridRetriever.from_vector_store(db)
 relevant_docs, debug = hybrid_index.retrieve(
