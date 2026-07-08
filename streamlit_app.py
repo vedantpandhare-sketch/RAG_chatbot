@@ -23,10 +23,22 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langsmith import traceable
 
-from rag_hybrid import (
-    HybridRetriever,
+import importlib.util
+_here = os.path.dirname(os.path.abspath(__file__))
+_rp_spec = importlib.util.spec_from_file_location(
+    "retrieval_pipeline",
+    os.path.join(_here, "2_retrieval_pipeline.py"),
+)
+retrieval_pipeline = importlib.util.module_from_spec(_rp_spec)
+_rp_spec.loader.exec_module(retrieval_pipeline)
+
+import sys as _sys
+_sys.path.insert(0, _here)
+from rag_utils import (
     build_marathi_rewrite_prompt,
-    extractive_marathi_answer_strict,
+    build_marathi_answer_prompt,
+    validate_marathi_answer,
+    refusal_message,
 )
 
 # ── Page config (must be first Streamlit call) ────────────────────────────────
@@ -201,14 +213,16 @@ hr { border-color: rgba(255,255,255,0.07); }
 # ── Constants ─────────────────────────────────────────────────────────────────
 PERSIST_DIRECTORY = "db/chroma_db"
 EMBEDDING_MODEL = "bge-m3"
-DEFAULT_CHAT_MODEL = "llama2:latest"
-DEFAULT_TOP_K = 3
-DEFAULT_SIMILARITY_THRESHOLD = 0.35  # Lower for multilingual (Marathi) text matching
+# llama3.2 generates Marathi far better than llama2.
+# Change to whichever model you have pulled locally.
+DEFAULT_CHAT_MODEL = "llama3.2:latest"
+DEFAULT_TOP_K = 5
+DEFAULT_SIMILARITY_THRESHOLD = 0.30
 AVAILABLE_MODELS = [
-    "llama2:latest",
-    "qwen2.5:3b-instruct",
     "llama3.2:latest",
+    "qwen2.5:3b-instruct",
     "qwen3:latest",
+    "llama2:latest",
 ]
 
 load_dotenv()
@@ -222,7 +236,6 @@ def _init_state():
         "db": None,
         "model": None,
         "embeddings": None,
-        "hybrid_index": None,
         "top_k": DEFAULT_TOP_K,
         "similarity_threshold": DEFAULT_SIMILARITY_THRESHOLD,
         "max_history_turns": 6,
@@ -247,7 +260,7 @@ def load_resources(chat_model: str):
         embedding_function=embeddings,
         collection_metadata={"hnsw:space": "cosine"},
     )
-    model = ChatOllama(model=chat_model, temperature=0, num_predict=256)
+    model = ChatOllama(model=chat_model, temperature=0.2, num_predict=512)
     return embeddings, db, model
 
 
@@ -283,7 +296,6 @@ def ensure_ready(chat_model: str) -> bool:
         st.session_state.embeddings = embeddings
         st.session_state.db = db
         st.session_state.model = model
-        st.session_state.hybrid_index = HybridRetriever.from_vector_store(db)
         st.session_state.ready = True
         st.session_state.init_error = None
         return True
@@ -294,76 +306,7 @@ def ensure_ready(chat_model: str) -> bool:
 
 
 # ── Core RAG logic ────────────────────────────────────────────────────────────
-@traceable(run_type="chain", name="rag_answer")
-def rag_answer(user_question: str, top_k: int, max_history_turns: int):
-    """Run history-aware retrieval + generation. Returns (answer, docs, search_q)."""
-    db: Chroma = st.session_state.db
-    model: ChatOllama = st.session_state.model
-    hybrid_index: HybridRetriever = st.session_state.hybrid_index
-    lc_history: list = st.session_state.lc_history
-
-    # Step 1 — Rewrite question as standalone if history exists
-    if False and lc_history:
-        conversation_history = "\n".join(
-            f"वापरकर्ता: {m.content}" if isinstance(m, HumanMessage) else f"सहाय्यक: {m.content}"
-            for m in lc_history[-max_history_turns:]
-        )
-        rewrite_msgs = [
-            SystemMessage(
-                content="तुम्ही फक्त प्रश्न पुनर्लेखन करणारे सहाय्यक आहात. उत्तरात फक्त पुनर्लिखित प्रश्न द्या."
-            ),
-            HumanMessage(content=build_marathi_rewrite_prompt(user_question, conversation_history)),
-        ] + lc_history[-max_history_turns:] + [
-            HumanMessage(content=f"New question: {user_question}")
-        ]
-        search_question = model.invoke(rewrite_msgs).content.strip()
-    else:
-        search_question = user_question
-
-    # Step 2 — Hybrid retrieve + rerank
-    docs, debug = hybrid_index.retrieve(
-        db,
-        search_question,
-        top_k=top_k,
-        semantic_k=max(12, top_k * 4),
-        lexical_k=max(12, top_k * 6),
-        min_score=0.12,
-    )
-    answer = extractive_marathi_answer_strict(user_question, docs)
-    if answer != "मला या प्रश्नासाठी दस्तऐवजांमध्ये पुरेशी माहिती सापडली नाही.":
-        if debug:
-            st.session_state.retrieval_debug = debug
-        st.session_state.lc_history.append(HumanMessage(content=user_question))
-        st.session_state.lc_history.append(AIMessage(content=answer))
-        return answer, docs, search_question
-
-    if debug:
-        st.session_state.retrieval_debug = debug
-
-    # Step 3 — Build context
-    context = format_context(docs, max_chars_per_doc=1200)
-
-    # Step 4 — Generate answer in Marathi
-    combined_input = build_marathi_answer_prompt(user_question, context)
-    answer_msgs = [
-        SystemMessage(
-            content=(
-                "तू एक काटेकोर दस्तऐवज-आधारित सहाय्यक आहेस. "
-                "फक्त दिलेल्या दस्तऐवजांवर आधारित उत्तर दे. "
-                "उत्तर मराठीतच द्या."
-            )
-        ),
-    ] + [
-        HumanMessage(content=combined_input)
-    ]
-    answer = model.invoke(answer_msgs).content.strip()
-
-    # Step 5 — Update LangChain history
-    st.session_state.lc_history.append(HumanMessage(content=user_question))
-    st.session_state.lc_history.append(AIMessage(content=answer))
-    return answer, docs, search_question
-
-    return answer, docs, search_question
+# The original duplicate definition of rag_answer has been removed.
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -462,50 +405,68 @@ if st.session_state.init_error:
     st.stop()
 
 # ── Render existing chat messages ─────────────────────────────────────────────
-@traceable(run_type="chain", name="rag_answer_v2")
+@traceable(run_type="chain", name="rag_answer")
 def rag_answer(user_question: str, top_k: int, max_history_turns: int):
-    """Run history-aware hybrid retrieval + Marathi answer generation."""
+    """
+    History-aware RAG: retrieve → abstractive Marathi generation.
+    Extractive fallback is intentionally skipped because short OCR chunks
+    rarely produce reliable sentence-level matches; LLM generation is better.
+    """
     db: Chroma = st.session_state.db
     model: ChatOllama = st.session_state.model
-    hybrid_index: HybridRetriever = st.session_state.hybrid_index
     lc_history: list = st.session_state.lc_history
 
-    if False and lc_history:
-        conversation_history = "\n".join(
+    # Step 1 — Silent history-aware query rewriting
+    search_question = user_question
+    if lc_history:
+        history_text = "\n".join(
             f"वापरकर्ता: {m.content}" if isinstance(m, HumanMessage) else f"सहाय्यक: {m.content}"
             for m in lc_history[-max_history_turns:]
         )
-        rewrite_msgs = [
-            SystemMessage(content="तुम्ही फक्त प्रश्न पुनर्लेखन करणारे सहाय्यक आहात. फक्त पुनर्लिखित प्रश्न द्या."),
-            HumanMessage(content=build_marathi_rewrite_prompt(user_question, conversation_history)),
-        ]
-        search_question = model.invoke(rewrite_msgs).content.strip() or user_question
-    else:
-        search_question = user_question
+        try:
+            rewritten = model.invoke([
+                SystemMessage(content=(
+                    "तुम्ही फक्त प्रश्न पुनर्लेखन करणारे सहाय्यक आहात. "
+                    "फक्त पुनर्लिखित प्रश्न द्या, इतर काही नाही."
+                )),
+                HumanMessage(content=build_marathi_rewrite_prompt(user_question, history_text)),
+            ]).content.strip()
+            if rewritten:
+                search_question = rewritten
+        except Exception:
+            pass
 
-    docs, debug = hybrid_index.retrieve(
-        db,
+    # Step 2 — Retrieve (verbose=False: no console noise)
+    docs = retrieval_pipeline.retrieve_with_hybrid_search(
         search_question,
-        top_k=top_k,
-        semantic_k=max(12, top_k * 4),
-        lexical_k=max(12, top_k * 6),
-        min_score=0.12,
+        k=top_k,
+        use_pre_filter=True,
+        db=db,
+        verbose=False,
     )
-    st.session_state.retrieval_debug = debug
 
-    answer = extractive_marathi_answer_strict(user_question, docs)
-    if answer != "मला या प्रश्नासाठी दस्तऐवजांमध्ये पुरेशी माहिती सापडली नाही.":
+    if not docs:
+        answer = refusal_message()
         st.session_state.lc_history.append(HumanMessage(content=user_question))
         st.session_state.lc_history.append(AIMessage(content=answer))
-        return answer, docs, search_question
+        return answer, [], search_question
 
-    context = format_context(docs, max_chars_per_doc=1200)
-    combined_input = build_marathi_answer_prompt(user_question, context)
-    answer_msgs = [
-        SystemMessage(content="तू काटेकोर दस्तऐवज-आधारित सहाय्यक आहेस. उत्तर मराठीतच द्या."),
-        HumanMessage(content=combined_input),
-    ]
-    answer = model.invoke(answer_msgs).content.strip()
+    # Step 3 — Abstractive Marathi generation
+    context = retrieval_pipeline.format_context(docs)
+    prompt  = build_marathi_answer_prompt(user_question, context)
+
+    try:
+        answer = model.invoke([
+            SystemMessage(content=(
+                "तू एक अचूक, दस्तऐवज-आधारित मराठी सहाय्यक आहेस. "
+                "उत्तर नेहमी मराठी भाषेत आणि देवनागरी लिपीत दे. "
+                "दिलेल्या दस्तऐवजांमधील माहितीवर आधारित स्वतःच्या शब्दांत संक्षिप्त उत्तर दे."
+            )),
+            HumanMessage(content=prompt),
+        ]).content.strip()
+    except Exception as exc:
+        answer = refusal_message()
+
     ok, _reason = validate_marathi_answer(answer, context)
     if not ok:
         answer = refusal_message()
@@ -523,16 +484,17 @@ for msg in st.session_state.messages:
         if msg["role"] == "assistant" and msg.get("sources"):
             with st.expander(f"📚 {len(msg['sources'])} source(s) used"):
                 for doc in msg["sources"]:
-                    src = doc.metadata.get("source", "unknown")
+                    src = doc.metadata.get("source_pdf", doc.metadata.get("source", "unknown"))
+                    date = doc.metadata.get("primary_date", "")
+                    page = doc.metadata.get("page_number", "")
                     preview = doc.page_content[:400].replace("\n", " ")
+                    label = os.path.basename(src)
+                    meta = " · ".join(filter(None, [f"पान {page}" if page else "", date]))
                     st.markdown(
-                        f"**{os.path.basename(src)}**  \n"
+                        f"**{label}** {f'— {meta}' if meta else ''}  \n"
                         f"<div class='source-block'>{preview}…</div>",
                         unsafe_allow_html=True,
                     )
-
-        if msg["role"] == "assistant" and msg.get("search_q") and msg["search_q"] != msg.get("original_q"):
-            st.caption(f"🔍 Searched as: *{msg['search_q']}*")
 
 
 # ── Chat input ────────────────────────────────────────────────────────────────
@@ -565,14 +527,21 @@ if prompt := st.chat_input("Ask a question about your documents…"):
         thinking_placeholder.empty()
         st.markdown(answer)
 
-        # Sources expander
+        # Sources expander with richer metadata
         if docs:
-            with st.expander(f"📚 {len(docs)} source(s) used  ·  _{elapsed:.1f}s_"):
+            with st.expander(f"📚 {len(docs)} source(s) · _{elapsed:.1f}s_"):
                 for doc in docs:
-                    src = doc.metadata.get("source", "unknown")
+                    src  = doc.metadata.get("source_pdf", doc.metadata.get("source", "unknown"))
+                    date = doc.metadata.get("primary_date", "")
+                    page = doc.metadata.get("page_number", "")
+                    qual = doc.metadata.get("final_quality_score")
                     preview = doc.page_content[:400].replace("\n", " ")
+                    label = os.path.basename(src)
+                    meta_parts = [f"पान {page}" if page else "", date,
+                                  f"quality {qual:.2f}" if qual else ""]
+                    meta = " · ".join(p for p in meta_parts if p)
                     st.markdown(
-                        f"**{os.path.basename(src)}**  \n"
+                        f"**{label}** {f'— {meta}' if meta else ''}  \n"
                         f"<div class='source-block'>{preview}…</div>",
                         unsafe_allow_html=True,
                     )

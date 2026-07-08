@@ -176,10 +176,11 @@ Your `3_answer_generation.py` needs small updates to use the new metadata:
 retrieved_docs = retriever.invoke(query)
 
 # NEW CODE (from retrieval pipeline):
-from retrieval_pipeline import retrieve_with_hybrid_search, format_context
+import importlib
+retrieval_pipeline = importlib.import_module("2_retrieval_pipeline")
 
-retrieved_docs = retrieve_with_hybrid_search(query, k=5)
-context = format_context(retrieved_docs)
+retrieved_docs = retrieval_pipeline.retrieve_with_hybrid_search(query, k=5)
+context = retrieval_pipeline.format_context(retrieved_docs)
 
 # Pass context to LLM with date/source awareness:
 prompt = f"""

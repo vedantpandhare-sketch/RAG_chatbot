@@ -1,8 +1,11 @@
-﻿import re
+import re
+import sys
 from langchain_chroma import Chroma
 from langchain_ollama import OllamaEmbeddings
 from dotenv import load_dotenv
 from typing import List, Tuple
+
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 load_dotenv()
 
@@ -64,7 +67,7 @@ def custom_rrf_score(dense_rank: int, sparse_rank: int, k: int = 60, alpha: floa
     return combined
 
 
-def retrieve_with_hybrid_search(query: str, k: int = 10, use_pre_filter: bool = True) -> List:
+def retrieve_with_hybrid_search(query: str, k: int = 10, use_pre_filter: bool = True, db: Chroma = None, verbose: bool = True) -> List:
     """
     Perform hybrid search using BGE-M3's dense + sparse vectors.
     
@@ -74,18 +77,23 @@ def retrieve_with_hybrid_search(query: str, k: int = 10, use_pre_filter: bool = 
     3. RRF: Combine results, favoring keyword matches for OCR content
     4. Pre-filter: Remove irrelevant chunks
     5. Return: Top k combined results
+
+    Args:
+        verbose: If True, print progress messages. Set to False when called
+                 from chatbot or Streamlit to keep the UI clean.
     """
-    # Load embeddings and vector store
-    embedding_model = OllamaEmbeddings(model="bge-m3")
-    
-    db = Chroma(
-        persist_directory=persistent_directory,
-        embedding_function=embedding_model,
-        collection_metadata={"hnsw:space": "cosine"}  
-    )
+    # Load embeddings and vector store if not provided
+    if db is None:
+        embedding_model = OllamaEmbeddings(model="bge-m3")
+        db = Chroma(
+            persist_directory=persistent_directory,
+            embedding_function=embedding_model,
+            collection_metadata={"hnsw:space": "cosine"}  
+        )
     
     # Dense vector search (semantic)
-    print(f"🔍 Searching with Dense Vector (semantic)...")
+    if verbose:
+        print(f"🔍 Searching with Dense Vector (semantic)...")
     retriever_dense = db.as_retriever(
         search_type="similarity_score_threshold",
         search_kwargs={
@@ -95,18 +103,19 @@ def retrieve_with_hybrid_search(query: str, k: int = 10, use_pre_filter: bool = 
     )
     dense_results = retriever_dense.invoke(query)
     
-    # For sparse search, we would need a different approach
-    # Chroma doesn't natively support sparse vectors, but BGE-M3 generates them
-    # For now, we use dense results as primary
-    print(f"  Found {len(dense_results)} dense matches")
+    if verbose:
+        print(f"  Found {len(dense_results)} dense matches")
     
     # Pre-filter to remove clearly irrelevant chunks
     if use_pre_filter:
-        print(f"🔎 Pre-filtering for relevance...")
+        if verbose:
+            print(f"🔎 Pre-filtering for relevance...")
         dense_results = pre_filter_relevance(dense_results, query)
-        print(f"  Filtered to {len(dense_results)} relevant chunks")
+        if verbose:
+            print(f"  Filtered to {len(dense_results)} relevant chunks")
     
     return dense_results[:k]
+
 
 
 def format_context(retrieved_docs: List) -> str:

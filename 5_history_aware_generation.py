@@ -1,5 +1,6 @@
 import os
 import sys
+import importlib
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -8,10 +9,14 @@ from langchain_chroma import Chroma
 from langchain_ollama import OllamaEmbeddings, ChatOllama
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
-from rag_hybrid import (
-    HybridRetriever,
+# Import retrieval pipeline and utility helpers
+retrieval_pipeline = importlib.import_module("2_retrieval_pipeline")
+from rag_utils import (
     build_marathi_rewrite_prompt,
+    build_marathi_answer_prompt,
     extractive_marathi_answer_strict,
+    validate_marathi_answer,
+    refusal_message,
 )
 
 # Load environment variables
@@ -38,14 +43,14 @@ model = ChatOllama(model=CHAT_MODEL, temperature=0, num_predict=256)
 
 # Store our conversation as messages
 chat_history = []
-hybrid_index = HybridRetriever.from_vector_store(db)
 
 
 def ask_question(user_question):
     print(f"\n--- You asked: {user_question} ---")
+    search_question = user_question
 
     # Step 1: Make the question clear using conversation history
-    if False and chat_history:
+    if chat_history:
         history_text = "\n".join(
             f"वापरकर्ता: {msg.content}" if isinstance(msg, HumanMessage) else f"सहाय्यक: {msg.content}"
             for msg in chat_history[-MAX_HISTORY_TURNS:]
@@ -55,20 +60,21 @@ def ask_question(user_question):
             HumanMessage(content=build_marathi_rewrite_prompt(user_question, history_text)),
         ]
 
-        result = model.invoke(messages)
-        search_question = result.content.strip()
-        print(f"Searching for: {search_question}")
-    else:
-        search_question = user_question
+        try:
+            result = model.invoke(messages)
+            rewritten = result.content.strip()
+            if rewritten:
+                search_question = rewritten
+                print(f"Searching for: {search_question}")
+        except Exception as exc:
+            print(f"Failed to rewrite question using history: {exc}")
 
-    # Step 2: Hybrid retrieval + reranking
-    docs, _ = hybrid_index.retrieve(
-        db,
+    # Step 2: Retrieval using retrieval pipeline
+    docs = retrieval_pipeline.retrieve_with_hybrid_search(
         search_question,
-        top_k=TOP_K,
-        semantic_k=max(12, TOP_K * 4),
-        lexical_k=max(12, TOP_K * 6),
-        min_score=0.12,
+        k=TOP_K,
+        use_pre_filter=True,
+        db=db
     )
 
     print(f"Found {len(docs)} relevant documents:")
@@ -76,38 +82,41 @@ def ask_question(user_question):
         # Show first 2 lines of each document
         lines = doc.page_content.split("\n")[:2]
         preview = "\n".join(lines)
-        source = doc.metadata.get("source", "unknown source")
-        print(f"  Doc {i} [{source}]: {preview}...")
+        source = doc.metadata.get("source_pdf", doc.metadata.get("source", "unknown source"))
+        print(f"  Doc {i} [{os.path.basename(source)}]: {preview}...")
 
+    # Step 3: Try extractive answer first
     answer = extractive_marathi_answer_strict(user_question, docs)
-    chat_history.append(HumanMessage(content=user_question))
-    chat_history.append(AIMessage(content=answer))
-    print(f"\nAnswer: {answer}")
-    return answer
 
-    # If no documents found with high similarity, inform user
-    if not docs:
-        print("⚠️  No documents found with sufficient similarity. The answer may not be reliable.")
-        answer = "I don't have enough information to answer that question based on the provided documents."
-        chat_history.append(HumanMessage(content=user_question))
-        chat_history.append(AIMessage(content=answer))
-        return answer
+    # Step 4: Fallback to LLM if extractive search didn't find sufficient match
+    if answer == "मला या प्रश्नासाठी दस्तऐवजांमध्ये पुरेशी माहिती सापडली नाही.":
+        print("[Extractive search found no sufficient match. Falling back to LLM generation...]")
+        
+        # If no documents found with high similarity, inform user
+        if not docs:
+            print("⚠️ No documents found with sufficient similarity.")
+            answer = refusal_message()
+        else:
+            context = retrieval_pipeline.format_context(docs)
+            combined_input = build_marathi_answer_prompt(user_question, context)
 
-    # Step 3: Create final prompt
-    context = format_context(docs, max_chars_per_doc=1200)
-    combined_input = build_marathi_answer_prompt(user_question, context)
+            messages = [
+                SystemMessage(content="तू काटेकोर दस्तऐवज-आधारित सहाय्यक आहेस. उत्तर मराठीतच द्या."),
+                HumanMessage(content=combined_input)
+            ]
 
-    messages = [
-        SystemMessage(content="तू काटेकोर दस्तऐवज-आधारित सहाय्यक आहेस. उत्तर मराठीतच द्या."),
-    ] + [
-        HumanMessage(content=combined_input)
-    ]
-
-    result = model.invoke(messages)
-    answer = result.content.strip()
-    ok, _reason = validate_marathi_answer(answer, context)
-    if not ok:
-        answer = refusal_message()
+            try:
+                result = model.invoke(messages)
+                gen_answer = result.content.strip()
+                ok, _reason = validate_marathi_answer(gen_answer, context)
+                if ok:
+                    answer = gen_answer
+                else:
+                    print(f"[Validation Failed: {_reason}]")
+                    answer = refusal_message()
+            except Exception as exc:
+                print(f"[LLM Generation error: {exc}]")
+                answer = refusal_message()
 
     # Step 5: Remember this conversation
     chat_history.append(HumanMessage(content=user_question))
@@ -130,7 +139,10 @@ def start_chat():
     print("Ask me questions! Type 'quit' or 'exit' to stop.\n")
 
     while True:
-        question = input("Your question: ").strip()
+        try:
+            question = input("Your question: ").strip()
+        except EOFError:
+            break
 
         if not question:
             continue
