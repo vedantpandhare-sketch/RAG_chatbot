@@ -1,157 +1,343 @@
-import re
 import hashlib
+import re
 import unicodedata
 from collections import Counter
-from typing import List, Tuple, Iterable
+from typing import List, Tuple
+
 from langchain_core.documents import Document
 
+
+# ==============================================================================
+# Regular Expressions
+# ==============================================================================
+
 _WORD_RE = re.compile(r"[0-9A-Za-z\u0900-\u097F]+", re.UNICODE)
+
 _DEVANAGARI_RE = re.compile(r"[\u0900-\u097F]")
+
 _LATIN_RE = re.compile(r"[A-Za-z]")
+
 _NUMBER_RE = re.compile(r"\b\d+(?:[.,]\d+)?\b")
 
 
+# ==============================================================================
+# Text Utilities
+
 def normalize_text(text: str) -> str:
-    text = unicodedata.normalize("NFKC", text or "").lower()
+    """
+    Normalize unicode, lowercase and collapse whitespace.
+    """
+    text = unicodedata.normalize("NFKC", text or "")
+    text = text.lower()
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
 
 def tokenize(text: str) -> List[str]:
-    normalized = normalize_text(text)
-    return _WORD_RE.findall(normalized)
+    """
+    Tokenize Marathi + English text.
+    """
+    return _WORD_RE.findall(normalize_text(text))
 
 
 def contains_devanagari(text: str) -> bool:
+    """
+    Returns True if text contains Marathi/Hindi characters.
+    """
     return bool(_DEVANAGARI_RE.search(text or ""))
 
 
 def latin_letter_ratio(text: str) -> float:
+    """
+    Fraction of alphabetic characters that are Latin.
+    Used to reject English answers.
+    """
     text = text or ""
-    letters = [ch for ch in text if ch.isalpha()]
+
+    letters = [c for c in text if c.isalpha()]
+
     if not letters:
         return 0.0
-    latin = sum(1 for ch in letters if _LATIN_RE.match(ch))
+
+    latin = sum(1 for c in letters if _LATIN_RE.match(c))
+
     return latin / len(letters)
 
 
 def numbers_in_text(text: str) -> set[str]:
+    """
+    Extract numeric values.
+    """
     return set(_NUMBER_RE.findall(text or ""))
 
 
+# ==============================================================================
+# Document Helpers
+
 def doc_fingerprint(doc: Document) -> str:
+    """
+    Stable fingerprint used for duplicate removal.
+    """
+
     source = str(doc.metadata.get("source", ""))
-    page_number = str(doc.metadata.get("page_number", ""))
-    digest = hashlib.sha1(doc.page_content.encode("utf-8", errors="ignore")).hexdigest()
-    return f"{source}|{page_number}|{digest}"
+
+    page = str(doc.metadata.get("page_number", ""))
+
+    digest = hashlib.sha1(
+        doc.page_content.encode(
+            "utf-8",
+            errors="ignore"
+        )
+    ).hexdigest()
+
+    return f"{source}|{page}|{digest}"
 
 
-def _sentence_score(sentence: str, query_tokens: Counter[str], query_numbers: set[str]) -> float:
+# ==============================================================================
+# Sentence Scoring
+
+def _sentence_score(
+    sentence: str,
+    query_tokens: Counter,
+    query_numbers: set[str]
+) -> float:
+    """
+    Score a sentence against the user query.
+
+    The score is based on
+
+    • token overlap
+    • numeric overlap
+    • Devanagari bonus
+    """
+
     sent_tokens = Counter(tokenize(sentence))
+
     if not sent_tokens:
         return 0.0
 
-    overlap = sum(min(count, sent_tokens.get(token, 0)) for token, count in query_tokens.items())
-    token_score = overlap / max(1, sum(query_tokens.values()))
+    overlap = sum(
+        min(count, sent_tokens.get(token, 0))
+        for token, count in query_tokens.items()
+    )
 
-    sent_numbers = numbers_in_text(sentence)
+    token_score = overlap / max(
+        1,
+        sum(query_tokens.values())
+    )
+
     number_score = 0.0
+
     if query_numbers:
-        number_score = 1.0 if query_numbers & sent_numbers else 0.0
 
-    # Slightly favor sentences with Devanagari content in Marathi docs.
-    dev_bonus = 0.1 if contains_devanagari(sentence) else 0.0
-    return token_score * 0.75 + number_score * 0.15 + dev_bonus
+        if query_numbers & numbers_in_text(sentence):
+            number_score = 1.0
 
+    devanagari_bonus = (
+        0.10
+        if contains_devanagari(sentence)
+        else 0.0
+    )
 
-def extractive_marathi_answer_strict(question: str, docs: List[Document], min_score: float = 0.12) -> str:
+    return (
+        token_score * 0.75
+        + number_score * 0.15
+        + devanagari_bonus
+    )
+
+# ==============================================================================
+# Extractive Answer Builder
+
+def extractive_marathi_answer_strict(
+    question: str,
+    docs: List[Document],
+    min_score: float = 0.12,
+) -> str:
     """
-    Marathi answer selector that extracts the best matching sentences.
-    
-    Key behaviours:
-    - Searches both doc.page_content (small chunk) AND parent_chunk metadata
-      (the larger medium chunk stored during ingestion) to maximise recall on
-      short OCR fragments.
-    - Requires at least 1 content-token overlap (not 2) so short chunks are
-      not silently discarded.
-    - Falls back to a refusal message only when no sentence reaches min_score.
+    Selects the most relevant Marathi sentences from retrieved documents.
+
+    Improvements:
+    - Searches both child chunk and parent chunk.
+    - Removes duplicate sentences.
+    - Avoids selecting nearly identical sentences.
+    - Prioritizes sentences with higher lexical overlap.
+    - Returns up to 4 informative sentences.
     """
+
     if not docs:
-        return "मला या प्रश्नासाठी दस्तऐवजांमध्ये पुरेशी माहिती सापडली नाही."
+        return refusal_message()
 
-    q_tokens = Counter(tokenize(question))
-    q_numbers = numbers_in_text(question)
-    q_content_tokens = [t for t in q_tokens if len(t) >= 2]
+    query_tokens = Counter(tokenize(question))
+    query_numbers = numbers_in_text(question)
 
-    scored_sentences = []
+    content_tokens = [
+        token
+        for token in query_tokens
+        if len(token) >= 2
+    ]
+
+    scored = []
+
     for doc in docs:
-        # Build the text pool: small chunk + parent_chunk if available
-        texts_to_search = [doc.page_content or ""]
+
+        texts = []
+
+        if doc.page_content:
+            texts.append(doc.page_content)
+
         parent_chunk = doc.metadata.get("parent_chunk", "")
+
         if parent_chunk and parent_chunk != doc.page_content:
-            texts_to_search.append(parent_chunk)
-        combined_text = "\n".join(texts_to_search)
+            texts.append(parent_chunk)
 
-        sentences = re.split(r"(?<=[।.!?])\s+|\n+", combined_text)
+        combined_text = "\n".join(texts)
+
+        sentences = re.split(
+            r"(?<=[।.!?])\s+|\n+",
+            combined_text,
+        )
+
         for sentence in sentences:
+
             sentence = sentence.strip()
-            if not sentence or len(sentence) < 8:
+
+            if len(sentence) < 10:
                 continue
+
             sent_tokens = Counter(tokenize(sentence))
-            overlap = sum(1 for token in q_content_tokens if sent_tokens.get(token))
-            num_overlap = bool(q_numbers and numbers_in_text(sentence) & q_numbers)
-            # Lowered threshold: need at least 1 matching token (was 2)
-            if overlap < 1 and not num_overlap:
+
+            token_overlap = sum(
+                1
+                for token in content_tokens
+                if sent_tokens.get(token)
+            )
+
+            numeric_overlap = (
+                bool(
+                    query_numbers &
+                    numbers_in_text(sentence)
+                )
+            )
+
+            if token_overlap < 1 and not numeric_overlap:
                 continue
-            score = _sentence_score(sentence, q_tokens, q_numbers)
-            if score > 0:
-                scored_sentences.append((score, doc, sentence))
 
-    if not scored_sentences:
-        return "मला या प्रश्नासाठी दस्तऐवजांमध्ये पुरेशी माहिती सापडली नाही."
+            score = _sentence_score(
+                sentence,
+                query_tokens,
+                query_numbers,
+            )
 
-    scored_sentences.sort(key=lambda item: item[0], reverse=True)
-    if scored_sentences[0][0] < min_score:
-        return "मला या प्रश्नासाठी दस्तऐवजांमध्ये पुरेशी माहिती सापडली नाही."
+            if score <= 0:
+                continue
 
-    picked = []
-    seen = set()
-    for score, doc, sentence in scored_sentences:
-        fingerprint = doc_fingerprint(doc) + "|" + sentence[:80]
-        if fingerprint in seen:
+            scored.append(
+                (
+                    score,
+                    sentence,
+                    doc,
+                )
+            )
+
+    if not scored:
+        return refusal_message()
+
+    scored.sort(
+        key=lambda x: x[0],
+        reverse=True,
+    )
+
+    if scored[0][0] < min_score:
+        return refusal_message()
+
+    selected = []
+
+    seen_sentences = set()
+
+    seen_docs = set()
+
+    for score, sentence, doc in scored:
+
+        normalized = normalize_text(sentence)
+
+        if normalized in seen_sentences:
             continue
-        seen.add(fingerprint)
-        source = doc.metadata.get("source_pdf", doc.metadata.get("source", "unknown source"))
-        page_number = doc.metadata.get("page_number")
-        page_info = f", पान {page_number}" if page_number is not None else ""
-        picked.append(f"- {sentence} [{source}{page_info}]")
-        if len(picked) >= 3:  # return up to 3 sentences for richer answers
+
+        seen_sentences.add(normalized)
+
+        fingerprint = doc_fingerprint(doc)
+
+        if (
+            fingerprint in seen_docs
+            and len(selected) >= 2
+        ):
+            continue
+
+        seen_docs.add(fingerprint)
+
+        source = doc.metadata.get(
+            "source_pdf",
+            doc.metadata.get(
+                "source",
+                "Unknown",
+            ),
+        )
+
+        page = doc.metadata.get("page_number")
+
+        if page is None:
+            citation = f"[{source}]"
+        else:
+            citation = f"[{source}, पान {page}]"
+
+        selected.append(
+            f"• {sentence} {citation}"
+        )
+
+        if len(selected) >= 4:
             break
 
-    if not picked:
-        return "मला या प्रश्नासाठी दस्तऐवजांमध्ये पुरेशी माहिती सापडली नाही."
+    if not selected:
+        return refusal_message()
 
-    return "दस्तऐवजानुसार:\n" + "\n".join(picked)
+    return (
+        "दस्तऐवजांनुसार संबंधित माहिती:\n\n"
+        + "\n".join(selected)
+    )
 
 
+# Validation
 
-def validate_marathi_answer(answer: str, context: str, require_marathi: bool = True) -> Tuple[bool, str]:
+def validate_marathi_answer(
+    answer: str,
+    context: str,
+    require_marathi: bool = True,
+) -> Tuple[bool, str]:
+
     answer = (answer or "").strip()
+
     if not answer:
         return False, "रिकामे उत्तर"
 
-    if require_marathi and not contains_devanagari(answer):
-        return False, "उत्तर मराठीत नाही"
+    if require_marathi:
 
-    if latin_letter_ratio(answer) > 0.6:
-        return False, "उत्तरात खूप इंग्रजी आहे"
+        if not contains_devanagari(answer):
+            return False, "उत्तर मराठीत नाही"
+
+    if latin_letter_ratio(answer) > 0.55:
+        return False, "उत्तरात इंग्रजीचे प्रमाण जास्त आहे"
 
     return True, "ok"
 
 
-def refusal_message() -> str:
-    return "माझ्याकडे दिलेल्या दस्तऐवजांवर आधारित पुरेशी माहिती नाही."
 
+# Refusal
+
+def refusal_message() -> str:
+    return (
+        "दिलेल्या दस्तऐवजांमध्ये या प्रश्नाचे उत्तर "
+        "उपलब्ध नाही किंवा पुरेशी माहिती सापडली नाही."
+    )
 
 def build_marathi_rewrite_prompt(user_question: str, conversation_history: str) -> str:
     return f"""तुम्ही संभाषणातील मागील संदर्भ वापरून प्रश्न एकटाच (standalone) आणि शोधता येईल असा पुन्हा लिहा.
@@ -166,23 +352,118 @@ def build_marathi_rewrite_prompt(user_question: str, conversation_history: str) 
 """
 
 
-def build_marathi_answer_prompt(user_question: str, context: str) -> str:
-    return f"""फक्त खाली दिलेल्या दस्तऐवजांवर आधारित उत्तर द्या.
-उत्तर मराठीत आणि देवनागरी लिपीत द्या.
-इंग्रजी टाळा, फक्त आवश्यक नामे/संस्था नावं अपवाद असू शकतात.
-संक्षिप्त, थेट आणि तथ्यात्मक उत्तर द्या.
-जर उत्तर दस्तऐवजांमध्ये स्पष्टपणे नसेल, तर नेमके असे लिहा:
-"माझ्याकडे दिलेल्या दस्तऐवजांवर आधारित पुरेशी माहिती नाही."
+# System Prompt
 
-कडक नियम:
-1. फक्त दिलेल्या दस्तऐवजांमधील माहिती वापरा.
-2. अंदाज, कल्पना, किंवा बाह्य ज्ञान वापरू नका.
-3. उत्तरात शक्य असल्यास दस्तऐवजातील अचूक शब्द किंवा अतिशय जवळचा मजकूर वापरा.
-4. संदर्भात माहिती कमकुवत किंवा अपुरी असेल तर उत्तर देऊ नका.
+SYSTEM_PROMPT = """
+तुम्ही एक ज्ञानसंपन्न, विश्वासार्ह आणि उपयुक्त मराठी AI सहाय्यक आहात.
 
-प्रश्न:
+तुमचे एकमेव काम म्हणजे वापरकर्त्याच्या प्रश्नाचे उत्तर फक्त दिलेल्या संदर्भाच्या आधारे देणे.
+
+नेहमी खालील नियम पाळा:
+
+• उत्तर पूर्णपणे मराठीत आणि देवनागरी लिपीत असावे.
+• संदर्भामध्ये नसलेली माहिती स्वतःहून तयार करू नका.
+• बाह्य ज्ञान, अंदाज किंवा कल्पना वापरू नका.
+• उत्तर स्पष्ट, नैसर्गिक आणि समजण्यास सोपे असावे.
+• शक्य असल्यास प्रथम विषयाचा थोडक्यात परिचय द्या.
+• त्यानंतर मुख्य माहिती सविस्तर समजावून सांगा.
+• आवश्यक असल्यास बुलेट पॉइंट्स किंवा क्रमांक वापरा.
+• उत्तरात अनावश्यक पुनरावृत्ती टाळा.
+• उत्तर शक्य असल्यास १५० ते ३०० शब्दांमध्ये द्या.
+• जर संदर्भात उत्तर उपलब्ध नसेल तर फक्त खालील वाक्य लिहा:
+
+"दिलेल्या दस्तऐवजांमध्ये या प्रश्नाचे उत्तर उपलब्ध नाही."
+
+उत्तर देताना सर्वात महत्त्वाची गोष्ट म्हणजे अचूकता.
+"""
+
+
+# ==============================================================================
+# Query Rewrite Prompt
+# ==============================================================================
+
+def build_marathi_rewrite_prompt(
+    user_question: str,
+    conversation_history: str,
+) -> str:
+    """
+    Converts a follow-up question into a standalone search query.
+    """
+
+    return f"""
+तुम्ही शोध प्रणालीसाठी प्रश्न पुन्हा लिहिणारे सहाय्यक आहात.
+
+तुमचे काम:
+
+• संभाषणातील मागील संदर्भ समजून घ्या.
+• नवीन प्रश्न स्वतंत्र (standalone) स्वरूपात लिहा.
+• प्रश्नाचा मूळ अर्थ बदलू नका.
+• नवीन माहिती जोडू नका.
+• फक्त पुनर्लिखित प्रश्न द्या.
+• उत्तरात कोणतेही स्पष्टीकरण लिहू नका.
+
+संभाषण:
+
+{conversation_history}
+
+नवीन प्रश्न:
+
+{user_question}
+"""
+
+
+# ==============================================================================
+# Answer Prompt
+# ==============================================================================
+
+def build_marathi_answer_prompt(
+    user_question: str,
+    context: str,
+) -> str:
+    """
+    Builds the final prompt sent to the LLM.
+    """
+
+    return f"""
+खाली दिलेल्या संदर्भाचा काळजीपूर्वक अभ्यास करा.
+
+==============================
+संदर्भ
+==============================
+
+{context}
+
+==============================
+प्रश्न
+==============================
+
 {user_question}
 
-दस्तऐवज:
-{context}
+==============================
+उत्तर लिहिण्याची पद्धत
+==============================
+
+१. विषयाचा थोडक्यात परिचय द्या.
+
+२. प्रश्नाचे सविस्तर उत्तर द्या.
+
+३. आवश्यक असल्यास महत्त्वाचे मुद्दे बुलेट पॉइंट्समध्ये द्या.
+
+४. शेवटी छोटासा निष्कर्ष द्या.
+
+फक्त संदर्भातील माहिती वापरा.
 """
+
+
+# ==============================================================================
+# Convenience Helper
+# ==============================================================================
+
+def get_system_prompt() -> str:
+    """
+    Returns the system prompt.
+
+    This wrapper makes future prompt changes easier.
+    """
+
+    return SYSTEM_PROMPT
